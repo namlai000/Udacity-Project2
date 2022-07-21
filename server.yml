@@ -1,0 +1,158 @@
+Parameters:
+    EnvironmentName:
+        Description: The environment name that will be prefixed to resource names
+        Type: String
+Resources:
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Load Balancer Securit Group
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPC"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Web Server Security Group
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPC"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 0
+        ToPort: 65535
+        CidrIp: 0.0.0.0/0
+  RoleIAM:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${EnvironmentName}-ROLE
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+  RolePolicies:
+    Type: AWS::IAM::Policy
+    DependsOn: RoleIAM
+    Properties:
+      PolicyName: !Sub ${EnvironmentName}-POLICIES
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Action:
+          - s3:*
+          Resource:
+          - arn:aws:s3:::udagramproject2352345
+          - arn:aws:s3:::udagramproject2352345/*
+      Roles:
+      - !Ref RoleIAM
+  InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    DependsOn: RoleIAM
+    Properties:
+      Path: "/"
+      Roles:
+      - !Ref RoleIAM
+  WebServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      Port: 80
+      Protocol: HTTP
+      VpcId: 
+        Fn::ImportValue:
+          Fn::Sub: "${EnvironmentName}-VPC"
+  WebServerApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUBLIC-SN1"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUBLIC-SN2"
+      SecurityGroups:
+      - Ref: LoadBalancerSecurityGroup
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: WebServerTargetGroup
+      LoadBalancerArn:
+        Ref: WebServerApplicationLoadBalancer
+      Port: '80'
+      Protocol: HTTP
+  ApplicationLoadBalancerListenerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: forward
+          TargetGroupArn: !Ref "WebServerTargetGroup"
+        Conditions:
+        - Field: path-pattern
+          Values: [/]
+        ListenerArn: !Ref 'Listener'
+        Priority: 1
+  WebServerAutoScalingLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn: InstanceProfile
+    Properties:
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          apt-get install apache2 -y
+          cd /var/www/html
+          aws s3 cp s3://udagramproject2352345/index.zip .
+          unzip -o /var/www/html/index.zip
+          systemctl start apache2.service
+      ImageId: ami-005de95e8ff495156
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroups:
+      - Ref: WebServerSecurityGroup
+      InstanceType: t3.small
+      BlockDeviceMappings:
+      - DeviceName: "/dev/sdk"
+        Ebs:
+          VolumeSize: '10'
+  WebServerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+      - Fn::ImportValue: 
+          !Sub "${EnvironmentName}-PRIVATE-NETS"
+      LaunchConfigurationName:
+        Ref: WebServerAutoScalingLaunchConfig
+      MinSize: '4'
+      MaxSize: '8'
+      TargetGroupARNs:
+      - Ref: WebServerTargetGroup
+Outputs:
+  LoadBalancerUrl:
+    Value: !Join ["", ["http://", !GetAtt WebServerApplicationLoadBalancer.DNSName,]]
+    Export:
+      Name: !Sub ${EnvironmentName}-DNS-NAME
